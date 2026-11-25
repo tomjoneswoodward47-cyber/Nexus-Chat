@@ -1,0 +1,15 @@
+{
+  "appId": "com.nexus.chat.app",
+  "appName": "Nexus Chat",
+  "webDir": "dist",
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1500,
+      "backgroundColor": "#020617"
+    },
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_nexus",
+      "iconColor": "#0ea5e9"
+    }
+  }
+}

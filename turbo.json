@@ -1,0 +1,14 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "lint": { "tags": ["ci"] },
+    "test:downloads": { "tags": ["ci"] },
+    "test:email": { "tags": ["ci"] },
+    "test:e2ee": { "tags": ["ci"] },
+    "test:notifications": { "tags": ["ci"] },
+    "test:native-notifications": { "tags": ["ci"] },
+    "test:credentials": { "tags": ["ci"] },
+    "test:schema": { "tags": ["ci"] },
+    "test:perf": { "tags": ["ci"] }
+  }
+}

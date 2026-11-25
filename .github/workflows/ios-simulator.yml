@@ -1,0 +1,152 @@
+name: iOS simulator smoke test
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ios-simulator.yml'
+      - 'ios/**'
+      - 'src/**'
+      - 'public/**'
+      - 'scripts/**'
+      - 'capacitor.config.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.js'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ios-simulator.yml'
+      - 'ios/**'
+      - 'src/**'
+      - 'public/**'
+      - 'scripts/**'
+      - 'capacitor.config.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.js'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-simulator-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  simulator-smoke:
+    runs-on: macos-latest
+    # Headroom: a cold macOS runner spends most of its budget on `npm ci`, the
+    # CocoaPods install inside `cap sync` and two simulator boots, so the job
+    # limit is set well above a warm local build instead of just above it.
+    timeout-minutes: 90
+    env:
+      VITE_AUTH_PROVIDER: supabase
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+      # Headroom for `vite build`: V8 sizes its default heap for a small bundle,
+      # and the production build of this app needs more than that.
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Record available Apple tooling
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Build web assets
+        run: npm run build
+
+      - name: Sync Capacitor iOS project
+        run: npx cap sync ios
+
+      - name: Build iOS simulator app
+        run: |
+          xcodebuild \
+            -workspace ios/App/App.xcworkspace \
+            -scheme App \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Verify notification plugins are linked into the iOS build
+        run: |
+          set -euo pipefail
+
+          # 1. CocoaPods must resolve the notification plugins after `cap sync`.
+          #    Without these pods the JS bridge resolves LocalNotifications to
+          #    nothing and every tray notification silently no-ops on iOS.
+          for pod in CapacitorLocalNotifications CapacitorSplashScreen; do
+            grep -q "pod '$pod'" ios/App/Podfile \
+              || { echo "::error::$pod missing from ios/App/Podfile"; exit 1; }
+            echo "ok: $pod resolved in Podfile"
+          done
+
+          # 2. The plugin classes must be embedded in the built app bundle,
+          #    which is the ground truth that they are linked, not just declared.
+          frameworks="$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/App.app/Frameworks"
+          for pod in CapacitorLocalNotifications CapacitorSplashScreen; do
+            if [ ! -d "$frameworks/$pod.framework" ]; then
+              echo "::error::$pod.framework is not embedded in App.app"
+              ls -la "$frameworks" || true
+              exit 1
+            fi
+            echo "ok: $pod.framework embedded in App.app"
+          done
+
+      - name: Install and launch on iPhone and iPad simulators
+        run: |
+          set -euo pipefail
+          app_path="$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/App.app"
+          mkdir -p "$RUNNER_TEMP/ios-simulator-screenshots"
+
+          for family in iPhone iPad; do
+            simulator_id="$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          family = sys.argv[1]
+          devices = [
+              device
+              for runtime_devices in data["devices"].values()
+              for device in runtime_devices
+              if device.get("isAvailable") and device.get("name", "").startswith(family)
+          ]
+          if not devices:
+              raise SystemExit(f"No available {family} simulator on this Xcode runner")
+          print(devices[0]["udid"])
+          ' "$family")"
+
+            echo "Booting $family simulator $simulator_id"
+            xcrun simctl boot "$simulator_id"
+            xcrun simctl bootstatus "$simulator_id" -b
+            xcrun simctl install "$simulator_id" "$app_path"
+            xcrun simctl launch "$simulator_id" com.nexus.chat.app
+            # Headroom: a cold-launched Capacitor app still has to boot the
+            # WebView and render the first frame, so the wait is generous enough
+            # for the screenshot to capture a started app rather than a splash.
+            sleep 20
+            xcrun simctl io "$simulator_id" screenshot \
+              "$RUNNER_TEMP/ios-simulator-screenshots/${family}.png"
+            xcrun simctl shutdown "$simulator_id"
+          done
+
+      - name: Upload simulator launch screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-smoke-screenshots
+          path: ${{ runner.temp }}/ios-simulator-screenshots/
+          if-no-files-found: ignore
+          retention-days: 7

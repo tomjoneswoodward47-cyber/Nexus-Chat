@@ -1,0 +1,35 @@
+name: Project rules lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      # `npm run lint` runs ESLint and then scripts/check-project-rules.mjs, which
+      # enforces the four AGENTS.md rules: no payments, reportable/blockable UGC,
+      # VITE_AUTH_PROVIDER stays supabase, and no service-role proxying of user data.
+      - name: Lint and enforce project rules
+        run: npm run lint

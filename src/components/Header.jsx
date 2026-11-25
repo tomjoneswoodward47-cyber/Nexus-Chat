@@ -1,0 +1,106 @@
+import { SunIcon, MoonIcon } from '@heroicons/react/24/solid'
+import { Link, useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { useTheme } from '../hooks/useTheme'
+import { useAuth } from '../lib/authContextState'
+import Avatar from './chat/Avatar'
+
+function randomChoice(arr) {
+  return arr[Math.floor(Math.random() * arr.length)]
+}
+
+export default function Header({ showSignIn = true, children }) {
+  const { theme, toggleTheme } = useTheme()
+  const { user, logout } = useAuth()
+  const navigate = useNavigate()
+  const [logoStyle, setLogoStyle] = useState('brand-float')
+  const [logoFailed, setLogoFailed] = useState(false)
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false)
+
+  useEffect(() => {
+    // pick a random logo animation/style on load
+    const styles = ['brand-float', 'brand-spin', 'brand-wiggle', 'brand-pulse']
+    setLogoStyle(randomChoice(styles))
+  }, [])
+
+  // preserve capability to detect Capacitor/native platform without importing
+  const isNative = typeof window !== 'undefined' && window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform()
+
+  return (
+    <header className="sticky top-0 z-50 mx-auto flex w-full max-w-7xl flex-nowrap items-center justify-between gap-2 border-b border-border bg-card/80 text-foreground shadow-[0_18px_50px_rgba(15,23,42,0.10)] backdrop-blur-xl px-4 py-3 transition-all sm:gap-3 sm:px-6 sm:py-4 lg:px-8">
+      <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
+        <div className="brand-badge flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 via-cyan-400 to-blue-600 p-0.5 shadow-[0_18px_45px_rgba(59,130,246,0.30)] sm:h-[52px] sm:w-[52px] sm:rounded-[18px] sm:p-1">
+          <div className={`flex h-full w-full items-center justify-center overflow-hidden rounded-[9px] bg-slate-950 sm:rounded-[14px] ${logoStyle}`}>
+            {logoFailed ? (
+              <span aria-hidden="true" className="select-none text-sm font-black leading-none text-cyan-300 sm:text-lg">N</span>
+            ) : (
+              <img
+                src="/nexus-logo.svg"
+                alt="Nexus Chat logo"
+                width="128"
+                height="128"
+                decoding="async"
+                onError={() => setLogoFailed(true)}
+                className="h-full w-full object-cover"
+              />
+            )}
+          </div>
+        </div>
+        <div className="min-w-0 flex flex-col justify-center">
+          <h1 className="truncate text-base font-bold leading-none text-foreground sm:text-[clamp(1rem,4vw,1.125rem)]">Nexus Chat</h1>
+          <p className="truncate text-[10px] text-muted-foreground leading-tight sm:text-[11px] mt-0.5">Privacy-first encrypted messaging</p>
+        </div>
+      </div>
+
+      {children}
+
+      <div className="flex shrink-0 flex-nowrap items-center justify-end gap-2 sm:gap-3">
+        <button
+          onClick={toggleTheme}
+          className="flex h-10 w-10 items-center justify-center rounded-full border border-border bg-muted text-foreground hover:bg-muted/80 transition animate-in fade-in duration-200"
+          aria-label="Toggle theme"
+        >
+          {theme === 'dark' ? <SunIcon className="h-4 w-4" /> : <MoonIcon className="h-4 w-4" />}
+        </button>
+        {user ? (
+          <div className="relative">
+            <button
+              onClick={() => setProfileMenuOpen((open) => !open)}
+              className="flex items-center gap-2 hover:opacity-85 transition active:scale-95 duration-200"
+              title="Profile menu"
+              aria-haspopup="menu"
+              aria-expanded={profileMenuOpen}
+            >
+              <Avatar src={user.avatarUrl} alt={user.fullName || 'User'} size="sm" />
+            </button>
+            {profileMenuOpen && (
+              <div role="menu" className="absolute right-0 top-full mt-2 w-48 rounded-xl border border-border bg-card shadow-lg overflow-hidden z-50">
+                <Link
+                  to="/app/settings/profile"
+                  onClick={() => setProfileMenuOpen(false)}
+                  className="block px-4 py-2.5 text-sm text-foreground hover:bg-muted transition"
+                  role="menuitem"
+                >
+                  Profile settings
+                </Link>
+                <button
+                  onClick={async () => { setProfileMenuOpen(false); await logout(); navigate('/login', { replace: true }) }}
+                  className="w-full text-left px-4 py-2.5 text-sm font-medium text-destructive hover:bg-destructive/10 transition"
+                  role="menuitem"
+                >
+                  Log out
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          !isNative && showSignIn && (
+            <Link to="/login" className="shrink-0 whitespace-nowrap rounded-full bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition sm:px-4">
+              Sign in
+            </Link>
+          )
+        )}
+      </div>
+    </header>
+  )
+}

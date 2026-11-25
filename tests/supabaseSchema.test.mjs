@@ -1,0 +1,172 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import test from 'node:test'
+import { inspectSupabaseSchema, verifySupabaseApiCredentials } from '../scripts/lib/supabase-schema.js'
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+test('schema dry-run validates checked-in versioned migrations without connecting', () => {
+  const result = inspectSupabaseSchema({
+    databaseUrl: 'postgresql://test:test@db.example.invalid:5432/postgres',
+    root,
+  })
+
+  assert.equal(result.migrationDir, path.join(root, 'supabase', 'migrations'))
+  assert.ok(result.migrations.length >= 2)
+  assert.ok(result.migrations[0].bytes > 0)
+  assert.match(result.migrations[0].checksum, /^[a-f0-9]{64}$/)
+  // Every checked-in migration loads, including the Supabase CLI UUID names.
+  for (const migration of result.migrations) {
+    assert.ok(migration.bytes > 0, `${migration.file} should not be empty`)
+    assert.match(migration.checksum, /^[a-f0-9]{64}$/)
+  }
+  assert.ok(
+    result.migrations.some((migration) => /^20261012012428_[0-9a-f-]+\.sql$/.test(migration.file)),
+    'expected the Supabase CLI UUID-named migration to load',
+  )
+})
+
+test('self-service admin claim is removed from the canonical schema and existing databases', () => {
+  const schema = fs.readFileSync(path.join(root, 'docs', 'supabase-schema.sql'), 'utf8')
+  const settingsPage = fs.readFileSync(path.join(root, 'src', 'pages', 'SettingsPage.jsx'), 'utf8')
+  const migrationsDir = path.join(root, 'supabase', 'migrations')
+  const removalMigration = fs.readdirSync(migrationsDir)
+    .find((file) => file.endsWith('_remove_self_service_admin_claim.sql'))
+
+  assert.ok(removalMigration, 'expected a forward migration to remove the self-service admin claim')
+  assert.doesNotMatch(schema, /(?:create|grant execute on) function public\.claim_first_admin/i)
+  assert.doesNotMatch(settingsPage, /ClaimAdminCard|claim_first_admin/)
+
+  const migration = fs.readFileSync(path.join(migrationsDir, removalMigration), 'utf8')
+  assert.match(migration, /drop function if exists public\.claim_first_admin\(\)/i)
+  assert.match(migration, /drop function if exists private\.claim_first_admin\(\)/i)
+})
+
+test('Appwrite identity links remain inaccessible to browser roles', () => {
+  const schema = fs.readFileSync(path.join(root, 'docs', 'supabase-schema.sql'), 'utf8')
+  const migration = fs.readFileSync(
+    path.join(root, 'supabase', 'migrations', '20261013232516_appwrite_identity_links.sql'),
+    'utf8',
+  )
+  for (const sql of [schema, migration]) {
+    assert.match(sql, /create table (?:if not exists )?public\.appwrite_identity_links/i)
+    assert.match(sql, /enable row level security/i)
+    assert.match(sql, /revoke all on public\.appwrite_identity_links from public, anon, authenticated/i)
+    assert.match(sql, /grant all on public\.appwrite_identity_links to service_role/i)
+  }
+})
+
+test('text messages require a versioned encrypted payload in every database write', () => {
+  const schema = fs.readFileSync(path.join(root, 'docs', 'supabase-schema.sql'), 'utf8')
+  const migration = fs.readFileSync(
+    path.join(root, 'supabase', 'migrations', '20261028092157_call_history_message_type.sql'),
+    'utf8',
+  )
+  for (const sql of [schema, migration]) {
+    assert.match(sql, /messages_text_requires_encryption/i)
+    assert.match(sql, /type in \('reaction', 'receipt', 'image', 'video', 'voice', 'file', 'document', 'call'\) or \(/i)
+    assert.match(sql, /encrypted is true/i)
+    assert.match(sql, /ECDH-P256\+AES-256-GCM/i)
+    assert.match(sql, /\(content::jsonb - 'alg' - 'iv' - 'data'\) = '\{\}'::jsonb/i)
+    assert.match(sql, /->> 'iv'/i)
+    assert.match(sql, /->> 'data'/i)
+  }
+  assert.match(migration, /not valid/i)
+  // The superseded constraint definition must not survive in the canonical schema.
+  const initial = fs.readFileSync(
+    path.join(root, 'supabase', 'migrations', '20261021000131_enforce_encrypted_text_messages.sql'),
+    'utf8',
+  )
+  assert.match(initial, /not valid/i)
+})
+
+test('chat-files reads are scoped to the owner folder and admins', () => {
+  const schema = fs.readFileSync(path.join(root, 'docs', 'supabase-schema.sql'), 'utf8')
+  const migrationsDir = path.join(root, 'supabase', 'migrations')
+  const scopeMigration = fs.readdirSync(migrationsDir)
+    .find((file) => file.endsWith('_chat_files_read_owner_scope.sql'))
+
+  assert.ok(scopeMigration, 'expected a forward migration to scope chat-files reads to the owner')
+  // The bucket-wide read policy must be gone from the canonical schema and must
+  // be dropped by the forward migration so existing databases pick it up too.
+  assert.doesNotMatch(schema, /create policy "Chat files signed-in read"/i)
+  const migration = fs.readFileSync(path.join(migrationsDir, scopeMigration), 'utf8')
+  assert.match(migration, /drop policy if exists "Chat files signed-in read" on storage\.objects/i)
+  assert.match(migration, /drop policy if exists "Chat members read chat files" on storage\.objects/i)
+  // Both the canonical schema and the migration must enforce the owner/admin scope.
+  for (const sql of [schema, migration]) {
+    const normalized = sql.replace(/\s+/g, ' ')
+    assert.match(
+      normalized,
+      /create policy "Chat files own or admin read" on storage\.objects for select to authenticated using \(\s*bucket_id\s*=\s*'chat-files' and \(\(storage\.foldername\(name\)\)\[1\]\s*=\s*auth\.uid\(\)::text or public\.has_role\(auth\.uid\(\),\s*'admin'\)\s*\)\s*\)/i,
+    )
+  }
+})
+
+test('attachment sizes are persisted so the list can render a compact preview', () => {
+  const schema = fs.readFileSync(path.join(root, 'docs', 'supabase-schema.sql'), 'utf8')
+  const migrationsDir = path.join(root, 'supabase', 'migrations')
+  const sizeMigration = fs.readdirSync(migrationsDir)
+    .find((file) => file.endsWith('_add_message_file_size.sql'))
+
+  assert.ok(sizeMigration, 'expected a forward migration to add messages.file_size')
+  const migration = fs.readFileSync(path.join(migrationsDir, sizeMigration), 'utf8')
+  assert.match(migration, /alter table public\.messages add column if not exists file_size bigint/i)
+  // The canonical schema stays in step with the migration.
+  assert.match(schema, /file_size bigint/i)
+})
+
+test('schema dry-run rejects non-PostgreSQL URLs', () => {
+  assert.throws(
+    () => inspectSupabaseSchema({ databaseUrl: 'https://example.invalid/database', root }),
+    /postgres:\/\/ or postgresql:\/\//,
+  )
+})
+
+test('schema dry-run requires a database URL', () => {
+  assert.throws(
+    () => inspectSupabaseSchema({ databaseUrl: '', root }),
+    /SUPABASE_DB_URL is required/,
+  )
+})
+
+test('build environment validation does not execute schema migrations', () => {
+  const validator = fs.readFileSync(path.join(root, 'scripts', 'validate-production-env.js'), 'utf8')
+  assert.doesNotMatch(validator, /applySupabase|syncAppwriteSchema|verifyAppwriteSetup/)
+})
+
+test('API preflight checks anon and service-role credentials without exposing them', async () => {
+  const requests = []
+  const result = await verifySupabaseApiCredentials({
+    supabaseUrl: 'https://project.example.supabase.co',
+    anonKey: 'public-anon-test-key',
+    serviceRoleKey: 'private-service-test-key',
+    fetchImpl: async (url, options) => {
+      requests.push({ url, key: options.headers.apikey })
+      return { ok: true, status: 200 }
+    },
+  })
+
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.checks.map((check) => check.name), ['Supabase anon key', 'Supabase service-role key'])
+  assert.match(requests[0].url, /\/auth\/v1\/settings$/)
+  assert.match(requests[1].url, /\/auth\/v1\/admin\/users/)
+  assert.equal(requests[0].key, 'public-anon-test-key')
+  assert.equal(requests[1].key, 'private-service-test-key')
+})
+
+test('API preflight rejects a bad service-role key without echoing it', async () => {
+  await assert.rejects(
+    verifySupabaseApiCredentials({
+      supabaseUrl: 'https://project.example.supabase.co',
+      anonKey: 'public-anon-test-key',
+      serviceRoleKey: 'private-service-test-key',
+      fetchImpl: async (_url, options) => options.headers.apikey === 'private-service-test-key'
+        ? { ok: false, status: 401 }
+        : { ok: true, status: 200 },
+    }),
+    (error) => error.message.includes('HTTP 401') && !error.message.includes('private-service-test-key'),
+  )
+})

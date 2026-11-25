@@ -1,0 +1,114 @@
+# dependencies
+node_modules
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+dist
+dist-ssr
+.output
+.vinxi
+.tanstack/**
+.nitro
+
+# playwright browser downloads (perf/layout audits)
+.playwright-browsers/
+
+# misc
+.DS_Store
+# Private keys, certificates and keystores
+*.pem
+# The Play Console upload key certificate is a public certificate (no private
+# key) and is a tracked store-submission artifact, so keep that one file.
+!docs/store-submission/upload_certificate.pem
+
+# Android signing material — never commit keys or passwords
+android/key.properties
+*.keystore
+*.jks
+
+# Store-review demo account credentials
+.demo-accounts.local.json
+*.local
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# local env files
+.env
+.env.*
+!.env.example
+.env*.local
+.vercel-runtime-env.json
+
+# vercel
+.vercel
+nexus-chat-tmp
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Android large files (exceeds GitHub limits)
+android/gradle-dist/
+android/gradle-wrapper.zip
+android/*-bin.zip
+android/.gradle/
+android/app/build/
+android/capacitor-android/build/
+android/gradle/wrapper/
+# Project-local Android SDK used for local release builds
+android-sdk/
+
+# wrangler files
+.wrangler
+.wrangler/
+.dev.vars*
+!.dev.vars.example
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# Database backups — contain member data (names, chat titles, UUIDs). Never commit.
+supabase/backups/
+
+# Supabase CLI scratch state: link metadata and local `supabase start` secrets. Never commit.
+supabase/.temp/
+
+# Guard against committing a nested clone of this repo: the project root is itself
+# named `welcome-hub`, so a stray `git clone` inside it would create ./welcome-hub/.
+# Anchored to the repo root so only that accidental top-level copy is ignored.
+/welcome-hub/
+
+# Trae "HTML share package" exports: regenerated IDE artifacts whose contents are
+# verbatim copies of already-tracked files (index.html, src/main.jsx). Ignore the
+# directory's exports but keep the published share bundle under version control —
+# a directory-level ignore cannot be re-included in, so the wildcard form is used.
+.trae-html-share-packages/*
+!.trae-html-share-packages/index.html.zip
+
+# Encrypted credential vault: rotation history (current + superseded values).
+# The AES-256-GCM key lives only in CREDENTIAL_VAULT_KEY, never in the store or git.
+.nexus-credentials/

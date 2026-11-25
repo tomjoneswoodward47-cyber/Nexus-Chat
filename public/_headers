@@ -1,0 +1,20 @@
+# Long-lived, immutable caching for the vector logo so the public URL is served
+# reliably and cached by browsers and CDNs. Vercel applies these in production.
+/nexus-logo.svg
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Type: image/svg+xml
+  X-Content-Type-Options: nosniff
+
+# Browser-chrome icons keep stable filenames while their artwork changes, so they
+# must revalidate. Caching them immutably would pin a stale logo after an update.
+/favicon.ico
+  Cache-Control: public, max-age=0, must-revalidate
+/logo.png
+  Cache-Control: public, max-age=0, must-revalidate
+/logo-192.png
+  Cache-Control: public, max-age=0, must-revalidate
+/logo-maskable-512.png
+  Cache-Control: public, max-age=0, must-revalidate
+/apple-touch-icon.png
+  Cache-Control: public, max-age=0, must-revalidate
+

@@ -1,0 +1,287 @@
+import { useState, useEffect, useMemo, useCallback } from 'react'
+import { AuthContext } from './authContextState'
+import { formatNexusIdForDisplay, isAdminRole } from './authUtils'
+import { clearAdminSession } from './adminSession'
+import { terminateWorkflowSessions } from './workflowSessions'
+import {
+  getMemberProfile,
+  sendWelcomeEmail,
+  RECOVERY_SESSION_KEY,
+  isSupabaseConfigured,
+  resendEmailCode,
+  startPasswordRecoveryCode,
+  startSignupEmailCode,
+  signInWithEmail,
+  sendSecurityAlertEmail,
+  signOutFromSupabase,
+  supabase,
+  updateAuthenticatedPassword,
+  updateMemberProfile,
+  verifyEmailCode as verifyEmailOtp,
+  deleteAccount as deleteAccountViaApi,
+} from './supabase'
+import {
+  completeAppwriteRecovery,
+  getAppwriteProfile,
+  isAppwriteAuthEnabled,
+  rememberAppwriteRecoveryCode,
+} from './appwrite'
+import { isE2EEEnabled, provisionE2EEForNewAccount } from './crypto/e2ee'
+import { syncE2EEStatus } from './persistence'
+
+function normalizeUser(user) {
+  const rawRole = user.role || user.user_role || user.profile_role || 'user'
+  return {
+    id: user.id || user.$id,
+    nexusId: user.nexus_id || user.nexusId || user.member_id || user.memberId,
+    nexusIdDisplay: user.nexusIdDisplay || user.memberIdDisplay || formatNexusIdForDisplay(user.nexus_id || user.nexusId || user.member_id || user.memberId),
+    firstName: user.first_name || user.firstName,
+    lastName: user.last_name || user.lastName,
+    fullName: user.full_name || user.fullName || `${user.first_name || user.firstName || ''} ${user.last_name || user.lastName || ''}`.trim(),
+    email: user.email,
+    emailVerified: user.email_verified || user.emailVerified || false,
+    role: isAdminRole(rawRole) ? 'admin' : rawRole,
+    avatarUrl: user.avatar_url || user.avatarUrl || null,
+    bio: user.bio ?? user.bioText ?? '',
+    interests: user.interests || [],
+    createdAt: user.created_at || user.createdAt || user.$createdAt
+  }
+}
+
+function generateNexusId() {
+  return `10${String(Math.floor(Math.random() * 100000000)).padStart(8, '0')}`
+}
+
+// Context provider children are supplied by React composition, not an external prop API.
+// eslint-disable-next-line react/prop-types
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('nexus-chat-users')
+      window.localStorage.removeItem('nexus-chat-session')
+    }
+    if (isAppwriteAuthEnabled()) {
+      let active = true
+      getAppwriteProfile()
+        .then((profile) => { if (active) setUser(normalizeUser(profile)) })
+        .catch((error) => {
+          if (error?.code !== 401) console.error('Appwrite profile lookup failed', error)
+          if (active) setUser(null)
+        })
+        .finally(() => { if (active) setLoading(false) })
+      return () => { active = false }
+    }
+
+    if (!isSupabaseConfigured() || !supabase) {
+      setLoading(false)
+      return undefined
+    }
+
+    let active = true
+    const syncSession = async (session) => {
+      if (!active) return
+      if (!session?.user) {
+        setUser(null)
+        setLoading(false)
+        return
+      }
+      try {
+        const { data, error: validationError } = await supabase.auth.getUser()
+        if (validationError || !data.user) throw validationError || new Error('Session expired.')
+        const profile = await getMemberProfile(data.user.id)
+        void sendWelcomeEmail()
+        if (!active) return
+        setUser(normalizeUser({
+          ...profile,
+          email: session.user.email,
+          email_verified: Boolean(session.user.email_confirmed_at),
+        }))
+      } catch (error) {
+        console.error('Authenticated profile lookup failed', error)
+        if (active) setUser(null)
+      } finally {
+        if (active) setLoading(false)
+      }
+    }
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY' && session?.user) sessionStorage.setItem(RECOVERY_SESSION_KEY, session.user.id)
+      setTimeout(() => { void syncSession(session) }, 0)
+    })
+    supabase.auth.getSession()
+      .then(({ data, error }) => {
+        if (error) throw error
+        return syncSession(data.session)
+      })
+      .catch((error) => {
+        console.error('Supabase session lookup failed', error)
+        if (active) {
+          setUser(null)
+          setLoading(false)
+        }
+      })
+
+    return () => {
+      active = false
+      subscription.unsubscribe()
+    }
+  }, [])
+
+  const login = useCallback(async (email, password) => {
+    if (!isSupabaseConfigured()) throw new Error('Account sign-in is not configured.')
+    const { user: authUser } = await signInWithEmail(email, password)
+    const profile = await getMemberProfile(authUser.id)
+    void sendWelcomeEmail()
+    if (!isAdminRole(profile.role)) {
+      void sendSecurityAlertEmail().catch((error) => console.error('Sign-in alert email failed', error))
+    }
+    const sessionUser = normalizeUser({
+      ...profile,
+      email: authUser.email,
+      email_verified: Boolean(authUser.email_confirmed_at),
+    })
+    setUser(sessionUser)
+    return { user: sessionUser, nexusId: sessionUser.nexusId }
+  }, [])
+
+  const verifyEmailCode = useCallback(async (email, token, purpose = 'signup') => {
+    if (!isSupabaseConfigured()) throw new Error('Email verification is not configured.')
+    if (isAppwriteAuthEnabled() && purpose === 'recovery') {
+      rememberAppwriteRecoveryCode(token)
+      return { ok: true }
+    }
+    const authData = await verifyEmailOtp(email, token, purpose)
+    const authUser = authData?.user || authData?.session?.user
+    if (!authUser && purpose !== 'recovery') {
+      throw new Error('Supabase did not return a verified account.')
+    }
+    if (!authUser && purpose === 'recovery') {
+      return { ok: true }
+    }
+    if (purpose === 'recovery') return { ok: true }
+    const profile = await getMemberProfile(authUser.id)
+    void sendWelcomeEmail()
+    if (purpose === 'email' && !isAdminRole(profile.role)) {
+      void sendSecurityAlertEmail().catch((error) => console.error('Sign-in alert email failed', error))
+    }
+    const sessionUser = normalizeUser({
+      ...profile,
+      email: authUser.email,
+      email_verified: Boolean(authUser.email_confirmed_at),
+    })
+    setUser(sessionUser)
+
+    // New accounts are end-to-end encrypted by default. The device key pair is
+    // generated and published, and the outcome mirrored to the account record,
+    // before the dashboard is reached. A failure is reported rather than thrown
+    // so the verified account is never stranded at the verification screen.
+    if (purpose === 'signup') {
+      const provisioning = await provisionE2EEForNewAccount()
+      await syncE2EEStatus(isE2EEEnabled(), provisioning.ok)
+      return {
+        ...sessionUser,
+        e2eeProvisioned: provisioning.ok,
+        e2eeError: provisioning.error?.message || '',
+      }
+    }
+    return sessionUser
+  }, [])
+
+  const resendVerificationCode = useCallback(async (email, purpose = 'signup') => {
+    if (!isSupabaseConfigured()) throw new Error('Email verification is not configured.')
+    if (isAppwriteAuthEnabled() && purpose === 'recovery') {
+      await startPasswordRecoveryCode(email)
+      return
+    }
+    await resendEmailCode(email, purpose)
+  }, [])
+
+  const logout = useCallback(async () => {
+    await terminateWorkflowSessions().catch((error) => console.error('Workflow session termination failed during sign-out', error))
+    await clearAdminSession()
+    await signOutFromSupabase()
+    setUser(null)
+  }, [])
+
+  const register = useCallback(async ({ email, firstName, lastName, password }) => {
+    if (!isSupabaseConfigured()) throw new Error('Account registration is not configured.')
+    const normalizedEmail = String(email || '').trim().toLowerCase()
+    const normalizedFirstName = String(firstName || '').trim()
+    const normalizedLastName = String(lastName || '').trim()
+    const cleanPassword = String(password || '')
+    if (!normalizedEmail) throw new Error('Email is required.')
+    const nexusId = generateNexusId()
+    await startSignupEmailCode({
+      email: normalizedEmail,
+      password: cleanPassword,
+      firstName: normalizedFirstName,
+      lastName: normalizedLastName,
+      memberId: nexusId,
+    })
+    return { user: null, nexusId, email: normalizedEmail, needsEmailConfirmation: true }
+  }, [])
+
+  const updateProfile = useCallback(async (updates) => {
+    if (!user) return
+    const profile = await updateMemberProfile(user.id, updates)
+    setUser(normalizeUser({ ...profile, email: user.email, email_verified: user.emailVerified }))
+  }, [user])
+
+  const requestPasswordReset = useCallback(async (email) => {
+    if (!isSupabaseConfigured()) throw new Error('Password recovery is not configured.')
+    await startPasswordRecoveryCode(email)
+    return { ok: true }
+  }, [])
+
+  const resetPassword = useCallback(async (newPassword) => {
+    await terminateWorkflowSessions().catch((error) => console.error('Workflow session termination failed during password reset', error))
+    if (isAppwriteAuthEnabled()) {
+      await completeAppwriteRecovery(newPassword)
+    } else {
+      await updateAuthenticatedPassword(newPassword)
+    }
+    await clearAdminSession()
+    await signOutFromSupabase()
+    sessionStorage.removeItem(RECOVERY_SESSION_KEY)
+    setUser(null)
+    return { ok: true }
+  }, [])
+
+  // Removes the signed-in member's account and associated data, then clears the
+  // local session. The delete endpoint verifies the caller server-side, so this
+  // can only ever delete the account that is currently signed in.
+  const deleteAccount = useCallback(async () => {
+    if (!isSupabaseConfigured()) throw new Error('Account deletion is not configured.')
+    await terminateWorkflowSessions().catch((error) => console.error('Workflow session termination failed during account deletion', error))
+    await deleteAccountViaApi()
+    await clearAdminSession()
+    await signOutFromSupabase().catch(() => {})
+    sessionStorage.removeItem(RECOVERY_SESSION_KEY)
+    setUser(null)
+    return { ok: true }
+  }, [])
+
+  const value = useMemo(() => ({
+    user,
+    loading,
+    login,
+    logout,
+    register,
+    verifyEmailCode,
+    resendVerificationCode,
+    updateProfile,
+    requestPasswordReset,
+    resetPassword,
+    deleteAccount,
+  }), [user, loading, login, logout, register, verifyEmailCode, resendVerificationCode, updateProfile, requestPasswordReset, resetPassword, deleteAccount])
+
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  )
+}
+
